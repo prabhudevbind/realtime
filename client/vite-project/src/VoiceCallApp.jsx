@@ -2,13 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Phone, PhoneOff, Mic, MicOff } from 'lucide-react';
 import io from 'socket.io-client';
 
-const SOCKET_URL = '';
+const SOCKET_URL = process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5000';
 
 const iceServers = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 export default function VoiceCallApp() {
@@ -23,6 +27,7 @@ export default function VoiceCallApp() {
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
+  const localAudioRef = useRef(null);
 
   useEffect(() => {
     socketRef.current = io(SOCKET_URL);
@@ -84,6 +89,7 @@ export default function VoiceCallApp() {
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        console.log('Sending ICE candidate to', targetUserId);
         socketRef.current.emit('ice-candidate', {
           candidate: e.candidate,
           to: targetUserId
@@ -92,9 +98,10 @@ export default function VoiceCallApp() {
     };
 
     pc.ontrack = (e) => {
-      console.log('Received remote track');
-      if (remoteAudioRef.current) {
+      console.log('Received remote track:', e.track.kind);
+      if (remoteAudioRef.current && e.streams && e.streams[0]) {
         remoteAudioRef.current.srcObject = e.streams[0];
+        remoteAudioRef.current.play().catch(err => console.log('Audio play error:', err));
       }
     };
 
@@ -106,6 +113,10 @@ export default function VoiceCallApp() {
                  pc.connectionState === 'failed') {
         endCall();
       }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE connection state:', pc.iceConnectionState);
     };
 
     return pc;
@@ -121,21 +132,40 @@ export default function VoiceCallApp() {
       setCallStatus('Getting microphone access...');
       
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: true, 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }, 
         video: false 
       });
       
+      console.log('Got local stream:', stream.getTracks());
       localStreamRef.current = stream;
+      
+      // Set local audio for debugging
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = stream;
+        localAudioRef.current.muted = true; // Mute local audio to prevent echo
+      }
+      
       setIsInCall(true);
       setCallStatus('Calling...');
 
       peerConnectionRef.current = createPeerConnection(true);
 
+      // Add all tracks from the stream
       stream.getTracks().forEach(track => {
+        console.log('Adding track to peer connection:', track.kind, track.enabled);
         peerConnectionRef.current.addTrack(track, stream);
       });
 
-      const offer = await peerConnectionRef.current.createOffer();
+      const offer = await peerConnectionRef.current.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false
+      });
+      
+      console.log('Created offer:', offer);
       await peerConnectionRef.current.setLocalDescription(offer);
 
       socketRef.current.emit('offer', {
@@ -153,25 +183,45 @@ export default function VoiceCallApp() {
   const handleReceiveOffer = async (offer, from) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: true, 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }, 
         video: false 
       });
       
+      console.log('Got local stream for answer:', stream.getTracks());
       localStreamRef.current = stream;
+      
+      // Set local audio for debugging
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = stream;
+        localAudioRef.current.muted = true; // Mute local audio to prevent echo
+      }
+      
       setIsInCall(true);
       setTargetUserId(from);
 
       peerConnectionRef.current = createPeerConnection(false);
 
+      // Add all tracks from the stream
       stream.getTracks().forEach(track => {
+        console.log('Adding track to peer connection (answer):', track.kind, track.enabled);
         peerConnectionRef.current.addTrack(track, stream);
       });
 
+      console.log('Setting remote description:', offer);
       await peerConnectionRef.current.setRemoteDescription(
         new RTCSessionDescription(offer)
       );
 
-      const answer = await peerConnectionRef.current.createAnswer();
+      const answer = await peerConnectionRef.current.createAnswer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false
+      });
+      
+      console.log('Created answer:', answer);
       await peerConnectionRef.current.setLocalDescription(answer);
 
       socketRef.current.emit('answer', {
@@ -317,6 +367,7 @@ export default function VoiceCallApp() {
         )}
 
         <audio ref={remoteAudioRef} autoPlay />
+        <audio ref={localAudioRef} muted />
       </div>
     </div>
   );
