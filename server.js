@@ -123,11 +123,11 @@ io.on('connection', (socket) => {
 });
 
 // Serve static files from the built frontend
-app.use(express.static('client/vite-project/dist'));
+app.use(express.static('dist'));
 
 // Handle React routing, return all requests to React app
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'client/vite-project/dist', 'index.html'));
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 const PORT = process.env.PORT || 5000;
