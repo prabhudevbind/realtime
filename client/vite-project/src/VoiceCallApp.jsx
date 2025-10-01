@@ -1,16 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, MicOff } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 import io from 'socket.io-client';
 
-const SOCKET_URL = process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5000';
+const SOCKET_URL = 'http://localhost:5000';
 
+// Enhanced ICE servers configuration
 const iceServers = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' }
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.ekiga.net' },
+    { urls: 'stun:stun.ideasip.com' },
+    { urls: 'stun:stun.schlund.de' },
+    { urls: 'stun:stun.stunprotocol.org:3478' },
+    { urls: 'stun:stun.voiparound.com' },
+    { urls: 'stun:stun.voipbuster.com' },
+    { urls: 'stun:stun.voipstunt.com' },
+    { urls: 'stun:stun.counterpath.com' },
+    { urls: 'stun:stun.1und1.de' },
+    { urls: 'stun:stun.gmx.net' },
+    { urls: 'stun:stun.callwithus.com' },
+    { urls: 'stun:stun.counterpath.com' },
+    { urls: 'stun:stun.1und1.de' },
+    { urls: 'stun:stun.gmx.net' },
+    { urls: 'stun:stun.callwithus.com' },
+    { urls: 'stun:stun.internetcalls.com' }
   ],
   iceCandidatePoolSize: 10
 };
@@ -21,13 +38,16 @@ export default function VoiceCallApp() {
   const [isRegistered, setIsRegistered] = useState(false);
   const [isInCall, setIsInCall] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [isRemoteMuted, setIsRemoteMuted] = useState(false);
   const [callStatus, setCallStatus] = useState('');
+  const [connectionState, setConnectionState] = useState('disconnected');
   
   const socketRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
   const localAudioRef = useRef(null);
+  const isInitiatorRef = useRef(false);
 
   useEffect(() => {
     socketRef.current = io(SOCKET_URL);
@@ -84,39 +104,63 @@ export default function VoiceCallApp() {
     }
   };
 
-  const createPeerConnection = (isOfferer) => {
+  const createPeerConnection = () => {
+    console.log('Creating peer connection with ICE servers:', iceServers);
     const pc = new RTCPeerConnection(iceServers);
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
         console.log('Sending ICE candidate to', targetUserId);
         socketRef.current.emit('ice-candidate', {
-          candidate: e.candidate,
+          candidate: event.candidate,
           to: targetUserId
         });
+      } else {
+        console.log('ICE gathering complete');
       }
     };
 
-    pc.ontrack = (e) => {
-      console.log('Received remote track:', e.track.kind);
-      if (remoteAudioRef.current && e.streams && e.streams[0]) {
-        remoteAudioRef.current.srcObject = e.streams[0];
-        remoteAudioRef.current.play().catch(err => console.log('Audio play error:', err));
+    pc.ontrack = (event) => {
+      console.log('Received remote track:', event.track.kind, event.track.label);
+      if (event.streams && event.streams[0]) {
+        const remoteStream = event.streams[0];
+        console.log('Remote stream tracks:', remoteStream.getTracks());
+        
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = remoteStream;
+          remoteAudioRef.current.play().catch(err => {
+            console.log('Audio play error:', err);
+            // Try to play again after a short delay
+            setTimeout(() => {
+              remoteAudioRef.current.play().catch(e => console.log('Retry play failed:', e));
+            }, 100);
+          });
+        }
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log('Connection state:', pc.connectionState);
+      console.log('Connection state changed:', pc.connectionState);
+      setConnectionState(pc.connectionState);
+      
       if (pc.connectionState === 'connected') {
-        setCallStatus('Call connected');
+        setCallStatus('Call connected - Audio should be working now!');
       } else if (pc.connectionState === 'disconnected' || 
                  pc.connectionState === 'failed') {
+        setCallStatus('Connection lost');
         endCall();
       }
     };
 
     pc.oniceconnectionstatechange = () => {
       console.log('ICE connection state:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setCallStatus('ICE connection established - Audio should work!');
+      }
+    };
+
+    pc.ondatachannel = (event) => {
+      console.log('Data channel received');
     };
 
     return pc;
@@ -131,47 +175,70 @@ export default function VoiceCallApp() {
     try {
       setCallStatus('Getting microphone access...');
       
+      // Request audio with enhanced constraints
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 44100,
+          channelCount: 1
         }, 
         video: false 
       });
       
-      console.log('Got local stream:', stream.getTracks());
-      localStreamRef.current = stream;
+      console.log('Got local stream with tracks:', stream.getTracks().map(t => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        muted: t.muted,
+        label: t.label
+      })));
       
-      // Set local audio for debugging
+      localStreamRef.current = stream;
+      isInitiatorRef.current = true;
+      
+      // Set local audio for debugging (muted to prevent echo)
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = stream;
-        localAudioRef.current.muted = true; // Mute local audio to prevent echo
+        localAudioRef.current.muted = true;
       }
       
       setIsInCall(true);
-      setCallStatus('Calling...');
+      setCallStatus('Creating peer connection...');
 
-      peerConnectionRef.current = createPeerConnection(true);
+      // Create peer connection
+      peerConnectionRef.current = createPeerConnection();
 
-      // Add all tracks from the stream
-      stream.getTracks().forEach(track => {
-        console.log('Adding track to peer connection:', track.kind, track.enabled);
+      // Add audio tracks to peer connection
+      const audioTracks = stream.getAudioTracks();
+      console.log('Adding audio tracks to peer connection:', audioTracks.length);
+      
+      audioTracks.forEach(track => {
+        console.log('Adding audio track:', track.label, track.enabled);
         peerConnectionRef.current.addTrack(track, stream);
       });
 
+      setCallStatus('Creating offer...');
+      
+      // Create offer with specific options
       const offer = await peerConnectionRef.current.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: false
+        offerToReceiveVideo: false,
+        voiceActivityDetection: true
       });
       
-      console.log('Created offer:', offer);
+      console.log('Created offer:', offer.type, offer.sdp.substring(0, 100) + '...');
+      
       await peerConnectionRef.current.setLocalDescription(offer);
+      setCallStatus('Sending offer...');
 
+      // Send offer to target user
       socketRef.current.emit('offer', {
         offer,
         to: targetUserId
       });
+
+      setCallStatus('Offer sent, waiting for answer...');
 
     } catch (err) {
       console.error('Error starting call:', err);
@@ -182,54 +249,75 @@ export default function VoiceCallApp() {
 
   const handleReceiveOffer = async (offer, from) => {
     try {
+      setCallStatus('Incoming call, getting microphone access...');
+      
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          sampleRate: 44100,
+          channelCount: 1
         }, 
         video: false 
       });
       
-      console.log('Got local stream for answer:', stream.getTracks());
-      localStreamRef.current = stream;
+      console.log('Got local stream for answer with tracks:', stream.getTracks().map(t => ({
+        kind: t.kind,
+        enabled: t.enabled,
+        muted: t.muted,
+        label: t.label
+      })));
       
-      // Set local audio for debugging
+      localStreamRef.current = stream;
+      isInitiatorRef.current = false;
+      
+      // Set local audio for debugging (muted to prevent echo)
       if (localAudioRef.current) {
         localAudioRef.current.srcObject = stream;
-        localAudioRef.current.muted = true; // Mute local audio to prevent echo
+        localAudioRef.current.muted = true;
       }
       
       setIsInCall(true);
       setTargetUserId(from);
+      setCallStatus('Creating peer connection...');
 
-      peerConnectionRef.current = createPeerConnection(false);
+      // Create peer connection
+      peerConnectionRef.current = createPeerConnection();
 
-      // Add all tracks from the stream
-      stream.getTracks().forEach(track => {
-        console.log('Adding track to peer connection (answer):', track.kind, track.enabled);
+      // Add audio tracks to peer connection
+      const audioTracks = stream.getAudioTracks();
+      console.log('Adding audio tracks to peer connection (answer):', audioTracks.length);
+      
+      audioTracks.forEach(track => {
+        console.log('Adding audio track (answer):', track.label, track.enabled);
         peerConnectionRef.current.addTrack(track, stream);
       });
 
-      console.log('Setting remote description:', offer);
+      setCallStatus('Setting remote description...');
+      console.log('Setting remote description:', offer.type);
+      
       await peerConnectionRef.current.setRemoteDescription(
         new RTCSessionDescription(offer)
       );
 
+      setCallStatus('Creating answer...');
       const answer = await peerConnectionRef.current.createAnswer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: false
+        offerToReceiveVideo: false,
+        voiceActivityDetection: true
       });
       
-      console.log('Created answer:', answer);
+      console.log('Created answer:', answer.type, answer.sdp.substring(0, 100) + '...');
       await peerConnectionRef.current.setLocalDescription(answer);
 
+      setCallStatus('Sending answer...');
       socketRef.current.emit('answer', {
         answer,
         to: from
       });
 
-      setCallStatus('Call connected');
+      setCallStatus('Answer sent, establishing connection...');
 
     } catch (err) {
       console.error('Error handling offer:', err);
@@ -334,26 +422,38 @@ export default function VoiceCallApp() {
                   </p>
                 </div>
 
-                <div className="flex gap-3">
-                  <button
-                    onClick={toggleMute}
-                    className={`flex-1 py-3 rounded-lg font-semibold transition flex items-center justify-center gap-2 ${
-                      isMuted
-                        ? 'bg-yellow-600 hover:bg-yellow-700'
-                        : 'bg-gray-600 hover:bg-gray-700'
-                    } text-white`}
-                  >
-                    {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-                    {isMuted ? 'Unmute' : 'Mute'}
-                  </button>
+                <div className="space-y-3">
+                  <div className="flex gap-3">
+                    <button
+                      onClick={toggleMute}
+                      className={`flex-1 py-3 rounded-lg font-semibold transition flex items-center justify-center gap-2 ${
+                        isMuted
+                          ? 'bg-yellow-600 hover:bg-yellow-700'
+                          : 'bg-gray-600 hover:bg-gray-700'
+                      } text-white`}
+                    >
+                      {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+                      {isMuted ? 'Unmute' : 'Mute'}
+                    </button>
 
-                  <button
-                    onClick={endCall}
-                    className="flex-1 bg-red-600 text-white py-3 rounded-lg font-semibold hover:bg-red-700 transition flex items-center justify-center gap-2"
-                  >
-                    <PhoneOff size={20} />
-                    End Call
-                  </button>
+                    <button
+                      onClick={endCall}
+                      className="flex-1 bg-red-600 text-white py-3 rounded-lg font-semibold hover:bg-red-700 transition flex items-center justify-center gap-2"
+                    >
+                      <PhoneOff size={20} />
+                      End Call
+                    </button>
+                  </div>
+                  
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <div className="flex items-center gap-2 text-sm text-blue-800">
+                      <div className={`w-2 h-2 rounded-full ${
+                        connectionState === 'connected' ? 'bg-green-500' : 
+                        connectionState === 'connecting' ? 'bg-yellow-500' : 'bg-red-500'
+                      }`}></div>
+                      Connection: {connectionState}
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
